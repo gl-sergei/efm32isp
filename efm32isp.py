@@ -32,14 +32,13 @@ def handle_init(resp):
     while '' in lines:
         lines.remove('')
 
-    CHK( "ChipID" in lines[0], RESP_ERR,3)
+    CHK( "Chip ID" in lines[1], RESP_ERR,3)
 
-    version,ignore,chipid = lines[0].split(" ")
-    INFO( "Bootloader version: '%s' ChipID: '%s'" % (version,chipid) )
+    _,_,chip,_,version,_,_,chipid = lines[1].split(" ")
+    INFO( "Bootloader '%s' version: '%s' ChipID: '%s'" % (chip,version,chipid) )
     return (version,chipid)
 
-
-def upload(ser,path,flashsize,bootloadersize,shouldverify=True,destructive=False):
+def upload(ser,path,flashsize,bootloadersize,shouldverify=True,destructive=False,runapp=False):
     run = True
     while run:
         try:
@@ -47,6 +46,7 @@ def upload(ser,path,flashsize,bootloadersize,shouldverify=True,destructive=False
         except IOError:
             CHK( False, "'%s': can't open file" % path,5)
 
+        print 'Sending upload command'
         # upload command
         if destructive:
             ser.write('d')
@@ -54,21 +54,32 @@ def upload(ser,path,flashsize,bootloadersize,shouldverify=True,destructive=False
             ser.write('u')
 
         def ser_write(msg,timeout=1):
-            ser.setWriteTimeout(timeout)
+            ser.write_timeout = timeout
             return ser.write(msg)
 
         def ser_read(size,timeout=1):
-            ser.setTimeout(timeout)
+            ser.timeout = timeout
             return ser.read(size)
 
+        lines = []
+        resp=""
+        while len(lines)<3 and not resp.endswith('C'):
+            resp+=get_response(ser)
+            lines = resp.split('\r\n')
+        CHK( lines[1] == 'Ready', RESP_ERR, 3 )
+
         modem = XMODEM(ser_read, ser_write, pad='\xff')
+        print 'Starting XMODEM transfer'
         modem.send(f)
         f.close()
 
-        ser.setTimeout(0)
-        ser.setWriteTimeout(0)
+        ser.timeout = 0
+        ser.write_timeout = 0
+
+        print 'XMODEM transfer completed'
 
         if shouldverify:
+            print 'Verifying checksum'
             run = not verify(ser,path,flashsize,bootloadersize,destructive)
             if run: #verify failed
                 input_ok = False
@@ -81,8 +92,9 @@ def upload(ser,path,flashsize,bootloadersize,shouldverify=True,destructive=False
                         CHK( False, "Verify failed! Uploaded programm may be inconsistent!", 6)
         else:
             run = False
-    # reset command
-    ser.write('r')
+    if runapp:
+        print 'Starting application'
+        ser.write('b')
 
 def verify(ser,path,flashsize,bootloadersize,destructive=False):
     try:
@@ -130,19 +142,18 @@ def main(args):
     Options:
         -h --help                  Prints this help message
         -d                         Destructive upload, overwrites the bootloader
+        -r --run                   Run application after successful upload
         -p <port>, --port=<port>   Sets the UART port, any valid pyserial string is
                                    possible [default: /dev/ttyUSB0].
         -b <port>, --baud=<baud>   Sets the UART baud rate [default: 115200].
         -f <size>, --flashs=<size> Sets the programmflash size of the MCU (needed for
-                                   verify) [default: 0x100000]
+                                   verify) [default: 0x10000]
         -s <size>, --boots=<size>  Sets the size reserved for the bootloader (needed
-                                   non destructive verify) [default: 0x3000]
+                                   non destructive verify) [default: 0x4000]
     """
-    argp = docopt(main.__doc__,version="efm32isp 2014-03-28")
+    argp = docopt(main.__doc__,version="efm32isp 2016-11-04")
     try:
-        ser = serial.Serial(argp["--port"], argp["--baud"], timeout=0, parity=serial.PARITY_NONE)
-        if not ser.isOpen():
-            ser.open()
+        ser = serial.Serial(argp["--port"], argp["--baud"], timeout=0, bytesize=8, parity=serial.PARITY_NONE, stopbits=1)
     except serial.serialutil.SerialException as ex:
         ERR("Couldn't open serial port '" + argp["--port"] + "'" + os.linesep + str(ex),1)
     if not ser.isOpen():
@@ -155,7 +166,7 @@ def main(args):
     tries = 10
     while resp == "":
         #trigger auto baud rate configuration
-        ser.write("U")
+        ser.write("i")
         time.sleep(1.0/10)
         resp = get_response(ser)
         for i in range(5):
@@ -184,7 +195,8 @@ def main(args):
             int(argp["--flashs"],16),
             int(argp["--boots"],16),
             not argp["--noverify"],
-            argp["-d"])
+            argp["-d"],
+            argp["--run"])
 
 if __name__ == "__main__":
     main(sys.argv)
